@@ -647,7 +647,7 @@ function load(){
   try{const s=JSON.parse(localStorage.getItem(KEY)||'null'); if(s&&Array.isArray(s.books)) return s;}catch(e){}
   return {books:SAMPLE.map((b,i)=>{const{mine,...x}=b;return{...x,id:'ex'+i,no:i+1,example:!mine}}),next:SAMPLE.length+1};
 }
-function save(){try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}if(typeof pushRemote==='function')pushRemote()}
 
 /* ---------- seeded art generator ---------- */
 function hash(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}return h>>>0}
@@ -933,7 +933,7 @@ function render(){
   document.getElementById('basketCount').textContent=plan.length?`${plan.length} ${plural(plan.length,'книга','книги','книг')}`:'пусто';
   document.getElementById('stats').innerHTML=`<span>Прочитано: <b>${allRead.length}</b></span><span>В избранном: <b>${favN}</b></span>`;
   document.getElementById('addRow').hidden=guest;
-  document.getElementById('guestBanner').hidden=!guest;
+  document.getElementById('guestBanner').hidden=!(guest&&window.__owner);
 }
 function plural(n,a,b,c){const m=n%10,h=n%100;return m===1&&h!==11?a:m>=2&&m<=4&&(h<10||h>=20)?b:c}
 
@@ -1123,7 +1123,66 @@ document.querySelectorAll('[data-view]').forEach(c=>c.onclick=()=>{
   view=c.dataset.view;document.querySelectorAll('[data-view]').forEach(x=>x.setAttribute('aria-pressed',x===c));render()});
 const rb=document.getElementById('recBtn');rb.onclick=()=>{filter=filter==='rec'?'all':'rec';rb.setAttribute('aria-pressed',filter==='rec');render()};
 const gb=document.getElementById('guestBtn');
-gb.onclick=()=>{guest=!guest;gb.setAttribute('aria-pressed',guest);render()};
+gb.onclick=()=>{if(!ownerPass){openLogin();return}guest=!guest;gb.setAttribute('aria-pressed',guest);render()};
+
+/* ---------- shared library in Supabase: everyone reads, only the owner (password) writes ---------- */
+const SUPA_URL='https://rtnptngslbqlnpkzthos.supabase.co',SUPA_KEY='sb_publishable_40kuUbhi5UXuGWUP2DqbVA_s7TklON8';
+const SUPA_H={'apikey':SUPA_KEY,'Content-Type':'application/json'};
+let ownerPass=null;try{ownerPass=localStorage.getItem('polka.pass')}catch(e){}
+let remoteReady=false,pushT=null;
+function setOwnerUi(){
+  window.__owner=!!ownerPass;
+  if(ownerPass){gb.textContent='Режим гостя';gb.setAttribute('aria-pressed',guest)}
+  else{guest=true;gb.textContent='Войти';gb.setAttribute('aria-pressed','false')}
+}
+async function rpc(name,body){
+  const r=await fetch(SUPA_URL+'/rest/v1/rpc/'+name,{method:'POST',headers:SUPA_H,body:JSON.stringify(body)});
+  if(!r.ok)throw new Error('rpc '+r.status);return r.json();
+}
+async function pullRemote(){
+  try{
+    const r=await fetch(SUPA_URL+'/rest/v1/shelf?id=eq.1&select=data',{headers:SUPA_H});
+    if(!r.ok)throw new Error('read '+r.status);
+    const rows=await r.json();remoteReady=true;
+    if(rows.length&&rows[0].data&&Array.isArray(rows[0].data.books)){
+      state=rows[0].data;try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}
+      if(scrim.hidden)render();
+    }else if(ownerPass){pushRemote(true)}
+  }catch(e){}
+}
+function pushRemote(now){
+  if(!ownerPass||!remoteReady)return;
+  clearTimeout(pushT);
+  pushT=setTimeout(async()=>{
+    try{const ok=await rpc('save_shelf',{pass:ownerPass,new_data:state});if(!ok)toast('Пароль не подошёл, изменения не сохранились')}
+    catch(e){toast('Нет связи с базой, изменения пока только на этом устройстве')}
+  },now?0:700);
+}
+function openLogin(){
+  scrim.innerHTML=`<div class="list-card" role="dialog" aria-modal="true" aria-label="Вход">
+    <h2>Вход для хозяйки полки</h2>
+    <p class="lead">Если пароля ещё нет, то, что ты введёшь сейчас, станет паролем полки. Гости смотрят полку без пароля.</p>
+    <div class="fields"><input id="pw" type="password" autocomplete="current-password" placeholder="Пароль" aria-label="Пароль"></div>
+    <div class="row"><button class="btn" id="pwOk">Войти</button><button class="btn ghost" id="pwNo">Отмена</button></div>
+  </div>`;
+  scrim.hidden=false;const inp=scrim.querySelector('#pw');inp.focus();
+  const go=async()=>{
+    const pass=inp.value.trim();if(pass.length<4){toast('Пароль хотя бы из 4 символов');return}
+    try{
+      const ok=await rpc('check_shelf_pass',{pass});
+      if(!ok){toast('Пароль не подошёл');return}
+      ownerPass=pass;try{localStorage.setItem('polka.pass',pass)}catch(e){}
+      guest=false;setOwnerUi();closeCard();render();toast('Готово, изменения сохраняются для всех');
+      remoteReady=true;
+      const r=await fetch(SUPA_URL+'/rest/v1/shelf?id=eq.1&select=id',{headers:SUPA_H});const rows=r.ok?await r.json():[];
+      if(!rows.length)pushRemote(true);
+    }catch(e){toast('Нет связи с базой, попробуй позже')}
+  };
+  scrim.querySelector('#pwOk').onclick=go;inp.addEventListener('keydown',e=>{if(e.key==='Enter')go()});
+  scrim.querySelector('#pwNo').onclick=closeCard;
+}
+setOwnerUi();
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!ownerPass)pullRemote()});
 document.getElementById('addBtn').onclick=()=>openCard(null);
 
 let tt;function toast(m){const t=document.getElementById('toast');t.textContent=m;t.hidden=false;clearTimeout(tt);tt=setTimeout(()=>t.hidden=true,1800)}
@@ -1135,6 +1194,7 @@ try{const tg=window.Telegram&&window.Telegram.WebApp;if(tg){tg.ready();tg.expand
 
 render();
 if(document.fonts&&document.fonts.ready)document.fonts.ready.then(render);
+pullRemote();
 })();
 </script>
 
